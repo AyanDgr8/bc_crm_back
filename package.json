@@ -20,6 +20,7 @@
     "nodemon": "^3.1.5"
   },
   "dependencies": {
+    "@cacheable/node-cache": "^1.5.6",
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.7.17",
     "axios": "^1.7.7",
@@ -45,6 +46,7 @@
     "nodemailer": "^6.10.1",
     "path-browserify": "^1.0.1",
     "postmark": "^4.0.5",
+    "pino": "^9.7.0",
     "qrcode": "^1.5.4",
     "stream-http": "^3.2.0",
     "url": "^0.11.4",

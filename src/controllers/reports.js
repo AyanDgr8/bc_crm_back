@@ -6,7 +6,6 @@ import { simpleParser } from 'mailparser';
 import { parse } from 'csv-parse/sync';
 import connectDB from '../db/index.js';
 import { logger } from '../logger.js';
-import _ from 'lodash';
 
 dotenv.config();
 
@@ -170,7 +169,7 @@ export const fetchAndInsertReports = async (req, res) => {
         // Iterate over each message
         // ---------------------------------------------
         for (const message of messages) {
-            const raw = _.flatten(message.parts.filter(p => p.which === '').map(p => p.body))[0];
+            const raw = message.parts.filter(p => p.which === '').flatMap(p => p.body)[0];
             const parsed = await simpleParser(raw);
             const subject = parsed.subject || '';
             

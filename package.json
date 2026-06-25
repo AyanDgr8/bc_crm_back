@@ -1,0 +1,55 @@
+{
+  "name": "back",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "npm install",
+    "start": "node src/index.js",
+    "dev": "nodemon -r dotenv/config --experimental-json-modules src/index.js"
+  },
+  "keywords": [
+    "Ayan",
+    "Khan"
+  ],
+  "author": "Ayan Khan",
+  "license": "ISC",
+  "description": "CRM-Backend",
+  "devDependencies": {
+    "nodemon": "^3.1.5"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.17",
+    "axios": "^1.7.7",
+    "bcrypt": "^5.1.1",
+    "body-parser": "^1.20.3",
+    "colors": "^1.4.0",
+    "cors": "^2.8.5",
+    "csv-parse": "^5.6.0",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "firebase": "^10.13.2",
+    "firebase-admin": "^12.5.0",
+    "firebaseui": "^6.1.0",
+    "https": "^1.0.0",
+    "imap-simple": "^5.1.0",
+    "joi": "^17.13.3",
+    "jsonwebtoken": "^9.0.2",
+    "mailparser": "^3.7.3",
+    "moment-timezone": "^0.5.45",
+    "morgan": "^1.10.0",
+    "mysql2": "^3.14.1",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.10.1",
+    "path-browserify": "^1.0.1",
+    "postmark": "^4.0.5",
+    "qrcode": "^1.5.4",
+    "stream-http": "^3.2.0",
+    "url": "^0.11.4",
+    "validator": "^13.12.0",
+    "winston": "^3.17.0",
+    "xlsx": "^0.18.5"
+  }
+}

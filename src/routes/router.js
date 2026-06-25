@@ -9,7 +9,8 @@ import {
     assignCustomerToTeam,
     checkDuplicates,
     getTeamRecords,
-    getCustomersByDateRange
+    getCustomersByDateRange,
+    getReceptionDashboardActivity
 } from '../controllers/customers.js';
 
 import { deleteCustomer, deleteMultipleCustomers } from '../controllers/deleteCustomers.js';
@@ -177,6 +178,7 @@ router.post('/customers/log-change', authenticateToken, historyCustomer);
 // Customer reminders
 router.get('/customers/reminders', authenticateToken, getReminders);
 router.get('/customers/getAllReminders', authenticateToken, getAllReminders);
+router.get('/dashboard/reception-activity', authenticateToken, getReceptionDashboardActivity);
 
 // Route to assign customers to team/agent
 router.post('/customers/assign-team', authenticateToken, assignCustomerToTeam);

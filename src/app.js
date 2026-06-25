@@ -10,17 +10,35 @@ import { logger } from './logger.js';
 
 const app = express();
 
-const allowedOrigins = [  'http://181.214.10.246:9787', 'https://bccrm.voicemeetme.net',
-			   'http://181.214.10.244:9787','https://181.214.10.244:9787',
-			   'http://181.214.10.244:5566','https://181.214.10.244:5566'
-                      ]; // Add frontend URL
+const allowedOrigins = [
+  'http://181.214.10.246:9787',
+  'https://bccrm.voicemeetme.net',
+  'http://181.214.10.244:9787',
+  'https://181.214.10.244:9787',
+  'http://181.214.10.244:5566',
+  'https://181.214.10.244:5566',
+  'http://localhost:9787',
+  'http://127.0.0.1:9787'
+];
+
+const isLocalDevOrigin = (origin) => {
+  try {
+    const { protocol, hostname } = new URL(origin);
+    return (
+      protocol === 'http:' &&
+      (hostname === 'localhost' || hostname === '127.0.0.1')
+    );
+  } catch {
+    return false;
+  }
+};
 
 const corsOptions = {
   origin: function (origin, callback) {
     // console.log(`Incoming request origin: ${origin}`); // Debugging
     // Allow requests with no origin, like mobile apps or curl requests
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    if (allowedOrigins.indexOf(origin) !== -1 || isLocalDevOrigin(origin)) {
       callback(null, true);
     } else {
       logger.warn(`CORS blocked: ${origin}`);

@@ -76,6 +76,12 @@ export const updateCustomer = async (req, res) => {
         scheduled_at: 'datetime'
       };
 
+      const isFutureDateTime = (value) => {
+        if (!value) return true;
+        const date = new Date(String(value).replace(' ', 'T'));
+        return !isNaN(date.getTime()) && date > new Date();
+      };
+
       // Helper function to normalize date values
       const normalizeDateValue = (value, type) => {
         if (!value) return null;
@@ -143,6 +149,13 @@ export const updateCustomer = async (req, res) => {
         const oldValue = customer[field];
         const normalizedNewValue = normalizeDateValue(newValue, fieldType);
         const normalizedOldValue = normalizeDateValue(oldValue, fieldType);
+
+        if (field === 'scheduled_at' && normalizedNewValue && !isFutureDateTime(normalizedNewValue)) {
+          await connection.rollback();
+          return res.status(400).json({
+            message: 'Reminder time must be a future date and time.'
+          });
+        }
 
         // Skip if values are equal after normalization
         if (normalizedNewValue === normalizedOldValue) continue;

@@ -305,6 +305,17 @@ export const checkExistingCustomer = async (req, res) => {
         const phone = req.params.phone;
         const team = req.params.team;
 
+        const [teamResult] = await connection.query(
+            'SELECT id, team_name FROM teams WHERE LOWER(team_name) = LOWER(?) OR LOWER(REPLACE(team_name, " ", "_")) = LOWER(?) LIMIT 1',
+            [team, team]
+        );
+
+        if (!teamResult.length) {
+            return res.json({ exists: false });
+        }
+
+        const teamId = teamResult[0].id;
+
         // Get the latest version for this phone number within the same team
         const [existingCustomer] = await connection.query(
             `WITH LatestVersions AS (
@@ -318,7 +329,7 @@ export const checkExistingCustomer = async (req, res) => {
                     SUBSTRING_INDEX(C_unique_id, '__', 1) as base_id
                 FROM customers c
                 WHERE phone_no_primary = ?
-                AND QUEUE_NAME = ?
+                AND team_id = ?
             )
             SELECT * FROM LatestVersions 
             ORDER BY 
@@ -326,7 +337,7 @@ export const checkExistingCustomer = async (req, res) => {
                 version_num DESC,
                 id DESC 
             LIMIT 1`,
-            [phone, team]
+            [phone, teamId]
         );
 
         if (existingCustomer.length > 0) {
@@ -344,14 +355,14 @@ export const checkExistingCustomer = async (req, res) => {
                         ELSE 0 
                     END as version_num
                 FROM customers 
-                WHERE QUEUE_NAME = ?
+                WHERE team_id = ?
                 AND (
                     C_unique_id = ? 
                     OR C_unique_id REGEXP ?
                 )
                 ORDER BY version_num DESC
                 LIMIT 1`,
-                [team, baseUniqueId, `^${baseUniqueId}__[0-9]+$`]
+                [teamId, baseUniqueId, `^${baseUniqueId}__[0-9]+$`]
             );
 
             let nextVersion = 1;
@@ -370,7 +381,7 @@ export const checkExistingCustomer = async (req, res) => {
                 exists: true,
                 latestVersion: latestVersionId,
                 suggestedId: `${baseUniqueId}__${nextVersion}`,
-                message: `Customer exists with version ${latestVersionId}.`,
+                message: 'A customer already exists with the same name and number.',
                 existingCustomer: {
                     customer_name: latestRecord.customer_name,
                     phone_no_primary: latestRecord.phone_no_primary,
@@ -409,6 +420,52 @@ const formatDate = (dateStr) => {
     return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} ${hour.padStart(2, '0')}:${minute.padStart(2, '0')}:${second.padStart(2, '0')}`;
 };
 
+const isFutureDateTime = (dateStr) => {
+    if (!dateStr) return true;
+    const normalized = String(dateStr).replace(' ', 'T');
+    const date = new Date(normalized);
+    return !isNaN(date.getTime()) && date > new Date();
+};
+
+const ensureEnquiryTypeColumn = async (connection) => {
+    const [columns] = await connection.query("SHOW COLUMNS FROM customers LIKE 'enquiry_type'");
+    if (columns.length === 0) {
+        await connection.query("ALTER TABLE customers ADD COLUMN enquiry_type ENUM('call', 'walk_in') DEFAULT NULL");
+    }
+};
+
+const createSchedulerReminder = async (connection, {
+    customerId,
+    cUniqueId,
+    scheduledAt,
+    username,
+    teamId,
+    notes
+}) => {
+    if (!scheduledAt) return;
+
+    const [existing] = await connection.query(
+        `SELECT id FROM scheduler WHERE customer_id = ? AND scheduled_at = ? LIMIT 1`,
+        [customerId, scheduledAt]
+    );
+
+    if (existing.length > 0) return;
+
+    await connection.query(
+        `INSERT INTO scheduler (customer_id, C_unique_id, scheduled_at, status, created_by, team_id, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+            customerId,
+            cUniqueId,
+            scheduledAt,
+            'pending',
+            username,
+            teamId,
+            notes || 'Follow-up reminder'
+        ]
+    );
+};
+
 export const createCustomer = async (req, res) => {
     const pool = await connectDB();
     let connection;
@@ -425,6 +482,7 @@ export const createCustomer = async (req, res) => {
         console.log('Creating customer with username:', username);
 
         connection = await pool.getConnection();
+        await ensureEnquiryTypeColumn(connection);
         // Start transaction explicitly
         await connection.beginTransaction();
         
@@ -452,8 +510,9 @@ export const createCustomer = async (req, res) => {
         const { 
             customer_name, phone_no_primary, phone_no_secondary, 
             email_id, address, country, disposition, designation,
-            QUEUE_NAME, comment, scheduled_at
+            QUEUE_NAME, comment, scheduled_at, enquiry_type
         } = req.body;
+        const normalizedEnquiryType = ['call', 'walk_in'].includes(enquiry_type) ? enquiry_type : null;
 
         console.log('Creating customer with username:', username);
 
@@ -501,6 +560,11 @@ export const createCustomer = async (req, res) => {
 
         // Format scheduled_at before any query construction
         const formattedScheduledAt = formatDate(scheduled_at);
+
+        if (formattedScheduledAt && !isFutureDateTime(formattedScheduledAt)) {
+            await connection.rollback();
+            return res.status(400).json({ message: 'Reminder time must be a future date and time.' });
+        }
 
 
         // Check if customer already exists in this queue to handle versioning
@@ -577,8 +641,8 @@ export const createCustomer = async (req, res) => {
                     customer_name, phone_no_primary, phone_no_secondary,
                     email_id, address, country, designation, disposition,
                     QUEUE_NAME, team_id, agent_name, C_unique_id,
-                    comment, scheduled_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+                    comment, scheduled_at, enquiry_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
             const insertValues = [
                 customer_name,
@@ -594,11 +658,21 @@ export const createCustomer = async (req, res) => {
                 agent_name,
                 C_unique_id,
                 comment || null,
-                formattedScheduledAt || null
+                formattedScheduledAt || null,
+                normalizedEnquiryType
             ];
             
             // Execute the insert with parameters
             const [result] = await connection.query(insertQuery, insertValues);
+
+            await createSchedulerReminder(connection, {
+                customerId: result.insertId,
+                cUniqueId: C_unique_id,
+                scheduledAt: formattedScheduledAt,
+                username,
+                teamId: team_id,
+                notes: comment || 'Follow-up reminder'
+            });
             
             await connection.commit();
             
@@ -631,8 +705,8 @@ export const createCustomer = async (req, res) => {
                 customer_name, phone_no_primary, phone_no_secondary,
                 email_id, address, country, designation, disposition,
                 QUEUE_NAME, team_id, agent_name, C_unique_id,
-                comment, scheduled_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+                comment, scheduled_at, enquiry_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
         const insertValues = [
             customer_name,
@@ -648,7 +722,8 @@ export const createCustomer = async (req, res) => {
             agent_name || null,
             C_unique_id,
             comment || null,
-            formattedScheduledAt || null
+            formattedScheduledAt || null,
+            normalizedEnquiryType
         ];
 
         // Debug logging
@@ -657,6 +732,15 @@ export const createCustomer = async (req, res) => {
 
         // Execute the insert with parameters
         const [result] = await connection.query(insertQuery, insertValues);
+
+        await createSchedulerReminder(connection, {
+            customerId: result.insertId,
+            cUniqueId: C_unique_id,
+            scheduledAt: formattedScheduledAt,
+            username,
+            teamId: team_id,
+            notes: comment || 'Follow-up reminder'
+        });
         
         await connection.commit();
         

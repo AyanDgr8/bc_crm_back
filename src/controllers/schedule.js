@@ -36,6 +36,26 @@ const baseFields = `
     JOIN brand b ON b.id = t.brand_id
 `;
 
+const backfillMissingSchedulerReminders = async (connection) => {
+    await connection.execute(`
+        INSERT INTO scheduler (customer_id, C_unique_id, scheduled_at, status, created_by, team_id, notes)
+        SELECT 
+            c.id,
+            c.C_unique_id,
+            c.scheduled_at,
+            'pending',
+            COALESCE(NULLIF(c.agent_name, ''), 'System'),
+            c.team_id,
+            COALESCE(NULLIF(c.comment, ''), 'Follow-up reminder')
+        FROM customers c
+        LEFT JOIN scheduler s 
+            ON s.customer_id = c.id 
+            AND s.scheduled_at = c.scheduled_at
+        WHERE c.scheduled_at IS NOT NULL
+            AND s.id IS NULL
+    `);
+};
+
 // Function to get reminders based on user role and time condition
 const fetchReminders = async (connection, userInfo, isAllReminders = false) => {
     const { role_name: role, business_center_id: businessCenterId, team_id: teamId, brand_id } = userInfo;
@@ -43,14 +63,14 @@ const fetchReminders = async (connection, userInfo, isAllReminders = false) => {
     
     // Time condition for reminders
     const timeCondition = isAllReminders 
-        ? `s.scheduled_at IS NOT NULL AND s.scheduled_at > NOW() AND s.status = 'pending'`
-        : `s.scheduled_at IS NOT NULL AND s.scheduled_at > NOW() AND s.status = 'pending' AND 
+        ? `s.scheduled_at IS NOT NULL AND s.status = 'pending'`
+        : `s.scheduled_at IS NOT NULL AND s.status = 'pending' AND 
            (TIMESTAMPDIFF(MINUTE, NOW(), s.scheduled_at) <= 15)`;
 
     let sql;
     if (role === 'admin') {
         sql = `SELECT ${baseFields} WHERE ${timeCondition} ORDER BY s.scheduled_at ASC`;
-    } else if (role === 'receptionist') {
+    } else if (role === 'receptionist' || role === 'business_admin') {
         sql = `SELECT ${baseFields} WHERE t.business_center_id = ? AND ${timeCondition} ORDER BY s.scheduled_at ASC`;
         params.push(businessCenterId);
     } else if (role === 'brand_user') {
@@ -85,6 +105,7 @@ export const getReminders = async (req, res) => {
             return res.status(404).json({ message: 'User  not found' });
         }
 
+        await backfillMissingSchedulerReminders(connection);
         const reminders = await fetchReminders(connection, userInfo);
         res.status(200).json(reminders);
     } catch (error) {
@@ -113,6 +134,7 @@ export const getAllReminders = async (req, res) => {
             return res.status(404).json({ message: 'User  not found' });
         }
 
+        await backfillMissingSchedulerReminders(connection);
         const reminders = await fetchReminders(connection, userInfo, true);
         res.status(200).json(reminders);
     } catch (error) {

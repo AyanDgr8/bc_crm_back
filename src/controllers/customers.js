@@ -608,3 +608,65 @@ export const searchTeams = async (req, res) => {
     res.status(500).json({ message: 'Error searching team', error: error.message });
   }
 };
+
+export const getReceptionDashboardActivity = async (req, res) => {
+  let connection;
+  try {
+    const pool = await connectDB();
+    connection = await pool.getConnection();
+
+    const [columns] = await connection.query("SHOW COLUMNS FROM customers LIKE 'enquiry_type'");
+    if (columns.length === 0) {
+      return res.json({ lastWalkIn: null, lastCallTransferred: null });
+    }
+
+    const scopedJoin = `
+      FROM customers c
+      JOIN teams t ON t.id = c.team_id
+      LEFT JOIN business_center bc ON bc.id = t.business_center_id
+      WHERE c.enquiry_type = ?
+    `;
+
+    const paramsForType = (type) => {
+      const params = [type];
+      let scope = '';
+
+      if (req.user.role === 'receptionist' || req.user.role === 'business_admin') {
+        scope = ' AND t.business_center_id = ?';
+        params.push(req.user.business_center_id);
+      } else if (req.user.role === 'brand_user') {
+        scope = ' AND t.brand_id = ?';
+        params.push(req.user.brand_id);
+      }
+
+      return { scope, params };
+    };
+
+    const selectFields = `
+      SELECT c.*, t.team_name, bc.business_name as business_center_name
+    `;
+
+    const walkInScope = paramsForType('walk_in');
+    const callScope = paramsForType('call');
+
+    const [walkIns] = await connection.query(
+      `${selectFields} ${scopedJoin} ${walkInScope.scope} ORDER BY c.date_created DESC, c.id DESC LIMIT 1`,
+      walkInScope.params
+    );
+
+    const [calls] = await connection.query(
+      `${selectFields} ${scopedJoin} ${callScope.scope} ORDER BY c.date_created DESC, c.id DESC LIMIT 1`,
+      callScope.params
+    );
+
+    res.json({
+      lastWalkIn: walkIns[0] || null,
+      lastCallTransferred: calls[0] || null
+    });
+  } catch (error) {
+    console.error('Error fetching dashboard activity:', error);
+    res.status(500).json({ message: 'Error fetching dashboard activity', error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};

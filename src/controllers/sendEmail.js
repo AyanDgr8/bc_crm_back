@@ -7,6 +7,11 @@ import { logger } from '../logger.js';
 
 dotenv.config();
 
+const isSmtpAuthError = (error) => (
+    error?.code === 'EAUTH' ||
+    error?.responseCode === 535
+);
+
 /**
  * Send email notification when a new customer is added
  * @param {Object} customerData - Customer information
@@ -86,7 +91,11 @@ export const sendCustomerNotification = async (customerData, teamEmail) => {
         });
         logger.info(`Email notification sent successfully for customer: ${customer_name}`);
     } catch (error) {
-        logger.error('Error sending email notification:', error);
+        if (isSmtpAuthError(error)) {
+            logger.warn('Email notification skipped: SMTP credentials were rejected.');
+        } else {
+            logger.error('Error sending email notification:', error);
+        }
         throw error;
     } finally {
         if (connection) {
@@ -150,6 +159,15 @@ export const sendNewCustomerEmail = async (req, res) => {
         });
 
     } catch (error) {
+        if (isSmtpAuthError(error)) {
+            logger.warn('sendNewCustomerEmail skipped because SMTP credentials are invalid.');
+            return res.status(200).json({
+                success: false,
+                emailSent: false,
+                message: 'Record created, but email notification was skipped because email credentials are invalid.'
+            });
+        }
+
         logger.error('Error in sendNewCustomerEmail:', error);
         res.status(500).json({
             success: false,

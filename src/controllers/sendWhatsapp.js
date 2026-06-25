@@ -7,8 +7,12 @@ import { instances } from './whatsapp.js';
 
 dotenv.config();
 
-// Helper to normalize username -> instance id (e.g. "John Doe" -> "john_doe")
-const usernameToInstance = (name='') => name.toLowerCase().replace(/\s+/g, '_');
+// Helper to normalize username -> instance id (e.g. "Akash Singh" -> "akash_1")
+const usernameToInstance = (name='') => {
+    const firstName = String(name).trim().split(/\s+/)[0] || 'user';
+    const normalized = firstName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    return `${normalized || 'user'}_1`;
+};
 
 // Resolve instance id in priority: explicit param -> username from req.user -> env default
 const resolveInstanceId = (explicit, req) => {
@@ -216,4 +220,3 @@ export const sendNewCustomerWhatsApp = async (req, res) => {
         }
     }
 };
-

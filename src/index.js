@@ -18,21 +18,27 @@ if (!process.env.PORT) {
   process.exit(1);
 }
 
-// Load SSL certificates
-let sslOptions;
-try {
-  console.log("?? Loading SSL certificates...".yellow.bold);
-  sslOptions = {
-    key: fs.readFileSync(path.resolve('ssl/privkey.pem')),
-    cert: fs.readFileSync(path.resolve('ssl/fullchain.pem'))
-  };
-} catch (error) {
-  console.error("? Error loading SSL certificates. Check paths and permissions.".red.bold, error);
-  process.exit(1);
-}
+const useHttps = process.env.HTTPS !== 'false';
 
-// Create HTTPS server
-const server = https.createServer(sslOptions, app);
+let server;
+if (useHttps) {
+  let sslOptions;
+  try {
+    console.log("?? Loading SSL certificates...".yellow.bold);
+    sslOptions = {
+      key: fs.readFileSync(path.resolve('ssl/privkey.pem')),
+      cert: fs.readFileSync(path.resolve('ssl/fullchain.pem'))
+    };
+  } catch (error) {
+    console.error("? Error loading SSL certificates. Check paths and permissions.".red.bold, error);
+    process.exit(1);
+  }
+
+  server = https.createServer(sslOptions, app);
+} else {
+  console.log("?? HTTPS disabled; starting local HTTP server.".yellow.bold);
+  server = http.createServer(app);
+}
 
 // Initialize the database connection pool
 const pool = connectDB();
@@ -40,7 +46,8 @@ const pool = connectDB();
 const startServer = async () => {
   try {
     await server.listen(process.env.PORT);
-    console.log(`?? Secure server is running on port: ${process.env.PORT}`.cyan.bold);
+    const protocol = useHttps ? 'HTTPS' : 'HTTP';
+    console.log(`?? ${protocol} server is running on port: ${process.env.PORT}`.cyan.bold);
   } catch (error) {
     console.error("? Error starting server:".red.bold, error);
     process.exit(1);

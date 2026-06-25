@@ -3,42 +3,151 @@
 import fs from 'fs';
 import path from 'path';
 import qrcode from 'qrcode';
-import { makeWASocket, DisconnectReason, useMultiFileAuthState, Browsers } from '@whiskeysockets/baileys';
+import {
+    makeWASocket,
+    DisconnectReason,
+    useMultiFileAuthState,
+    Browsers,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    isJidBroadcast
+} from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
 import connectDB from '../db/index.js';
+import NodeCache from '@cacheable/node-cache';
+import P from 'pino';
 
 // Store active instances
 export const instances = {};
 
-// Initialize WhatsApp connection
-export const initializeSock = async (instanceId, registerId) => {
+const baileysLogger = P({ timestamp: () => `,"time":"${new Date().toJSON()}"` });
+baileysLogger.level = 'silent';
+const msgRetryCounterCache = new NodeCache();
+
+const usernameToCanonicalInstanceId = (username = '') => {
+    const firstName = String(username).trim().split(/\s+/)[0] || 'user';
+    const normalized = firstName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    return `${normalized || 'user'}_1`;
+};
+
+const resolveCanonicalInstance = async (conn, req, requestedInstanceId) => {
+    const registerId = req.user.email;
+    const canonicalInstanceId = usernameToCanonicalInstanceId(req.user.username || registerId);
+    const userKey = req.user.userId || req.user.id || registerId.split('@')[0];
+
+    const [existingForUser] = await conn.query(
+        'SELECT * FROM instances WHERE register_id = ? LIMIT 1',
+        [registerId]
+    );
+
+    if (existingForUser.length > 0) {
+        const current = existingForUser[0];
+        if (current.instance_id === canonicalInstanceId) {
+            return { instanceId: canonicalInstanceId, registerId, row: current };
+        }
+
+        const [canonicalOwner] = await conn.query(
+            'SELECT register_id FROM instances WHERE instance_id = ? LIMIT 1',
+            [canonicalInstanceId]
+        );
+
+        const finalInstanceId = canonicalOwner.length && canonicalOwner[0].register_id !== registerId
+            ? `${canonicalInstanceId}_${userKey}`
+            : canonicalInstanceId;
+
+        if (instances[current.instance_id]) {
+            instances[finalInstanceId] = instances[current.instance_id];
+            delete instances[current.instance_id];
+        }
+
+        await conn.query(
+            'UPDATE instances SET instance_id = ?, updated_at = NOW() WHERE register_id = ?',
+            [finalInstanceId, registerId]
+        );
+
+        return {
+            instanceId: finalInstanceId,
+            registerId,
+            row: { ...current, instance_id: finalInstanceId }
+        };
+    }
+
+    const [requestedOwner] = requestedInstanceId
+        ? await conn.query('SELECT register_id FROM instances WHERE instance_id = ? LIMIT 1', [requestedInstanceId])
+        : [[]];
+
+    const finalInstanceId = requestedOwner.length && requestedOwner[0].register_id !== registerId
+        ? `${canonicalInstanceId}_${userKey}`
+        : canonicalInstanceId;
+
+    await conn.query(
+        'INSERT INTO instances (instance_id, register_id, status) VALUES (?, ?, ?)',
+        [finalInstanceId, registerId, 'disconnected']
+    );
+
+    return {
+        instanceId: finalInstanceId,
+        registerId,
+        row: { instance_id: finalInstanceId, register_id: registerId, status: 'disconnected' }
+    };
+};
+
+const getAuthFolder = (instanceId) => {
+    const userDir = path.resolve('..', 'auth_info');
+    return {
+        userDir,
+        authFolder: path.join(userDir, `instance_${instanceId}`)
+    };
+};
+
+const setInstanceStatus = async (instanceId, status) => {
     let conn;
+    try {
+        const pool = connectDB();
+        conn = await pool.getConnection();
+        await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', [status, instanceId]);
+    } catch (dbError) {
+        logger.error(`DB update failed while setting WhatsApp status "${status}"`, dbError);
+    } finally {
+        if (conn) conn.release();
+    }
+};
+
+// Initialize WhatsApp connection
+export const initializeSock = async (instanceId, registerId, options = {}) => {
     try {
         logger.info(`Initializing WhatsApp connection for instance ${instanceId}`);
         
         // keep auth outside src & back folders so nodemon doesn't watch it
-        const userDir = path.resolve('..', 'auth_info');
-        const authFolder = path.join(userDir, `instance_${instanceId}`);
+        const { userDir, authFolder } = getAuthFolder(instanceId);
 
         if (!fs.existsSync(userDir)) fs.mkdirSync(userDir, { recursive: true });
+        if (options.fresh && fs.existsSync(authFolder)) {
+            fs.rmSync(authFolder, { recursive: true, force: true });
+        }
         if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
         const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        logger.info(`Using WA v${version.join('.')}, isLatest: ${isLatest}`);
 
         const sock = makeWASocket({
-            auth: state,
+            version,
+            logger: baileysLogger,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, baileysLogger)
+            },
+            msgRetryCounterCache,
+            generateHighQualityLinkPreview: true,
             printQRInTerminal: false,
-            // emulate desktop client to get richer history & avoid WA web quirks
+            shouldIgnoreJid: (jid) => isJidBroadcast(jid),
             browser: Browsers.macOS('Desktop'),
             connectTimeoutMs: 120000,
             defaultQueryTimeoutMs: 90000,
             keepAliveIntervalMs: 15000,
-            emitOwnEvents: true,
-            markOnlineOnConnect: true,
             retryRequestDelayMs: 500
         });
-
-        sock.ev.on('creds.update', saveCreds);
 
         const connectionPromise = new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
@@ -47,98 +156,88 @@ export const initializeSock = async (instanceId, registerId) => {
 
             let hasResolved = false;
 
-            sock.ev.on('connection.update', async (update) => {
-                const { connection, qr, lastDisconnect } = update;
-                
-                if (qr && !hasResolved) {
-                    try {
-                        const url = await qrcode.toDataURL(qr);
+            sock.ev.process(async (events) => {
+                if (events['connection.update']) {
+                    const update = events['connection.update'];
+                    const { connection, qr, lastDisconnect } = update;
+
+                    if (qr && !hasResolved) {
+                        try {
+                            const url = await qrcode.toDataURL(qr);
+                            instances[instanceId] = {
+                                sock,
+                                qrCode: url,
+                                status: 'waiting_for_scan',
+                                lastUpdate: new Date(),
+                                registerId
+                            };
+                            await setInstanceStatus(instanceId, 'waiting_for_scan');
+                            clearTimeout(timeout);
+                            resolve({ qrCode: url });
+                            hasResolved = true;
+                        } catch (err) {
+                            logger.error('Error generating QR code:', err);
+                            clearTimeout(timeout);
+                            reject(err);
+                            hasResolved = true;
+                        }
+                    }
+
+                    if (connection === 'open') {
+                        clearTimeout(timeout);
                         instances[instanceId] = {
                             sock,
-                            qrCode: url,
-                            status: 'disconnected',
+                            status: 'connected',
                             lastUpdate: new Date(),
                             registerId
                         };
-                        
+                        await setInstanceStatus(instanceId, 'connected');
+
                         if (!hasResolved) {
-                            resolve({ qrCode: url });
+                            resolve({ connected: true });
                             hasResolved = true;
                         }
-                    } catch (err) {
-                        logger.error('Error generating QR code:', err);
-                        reject(err);
-                    }
-                }
-
-                if (connection === 'open') {
-                    clearTimeout(timeout);
-                    
-                    instances[instanceId] = {
-                        sock,
-                        status: 'connected',
-                        lastUpdate: new Date(),
-                        registerId
-                    };
-
-                    try {
-                        const pool = connectDB();
-                        conn = await pool.getConnection();
-                        await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['connected', instanceId]);
-                    } catch(dbError) {
-                        logger.error("DB update failed in 'open' state", dbError);
-                    } finally {
-                        if (conn) conn.release();
                     }
 
-                    await saveCreds();
-
-                    if (!hasResolved) {
-                        resolve({ connected: true });
-                        hasResolved = true;
-                    }
-                }
-
-                if (connection === 'close') {
-                    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                    
-                    if (shouldReconnect) {
-                        if(instances[instanceId]) {
-                            instances[instanceId].status = 'reconnecting';
-                            instances[instanceId].lastUpdate = new Date();
-                        }
-                        
-                        try {
-                            const pool = connectDB();
-                            conn = await pool.getConnection();
-                            await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['reconnecting', instanceId]);
-                        } catch(dbError) {
-                            logger.error("DB update failed in 'close' (reconnect) state", dbError);
-                        } finally {
-                            if (conn) conn.release();
-                        }
-
-                        setTimeout(() => initializeSock(instanceId, registerId).catch(logger.error), 5000);
-                    } else {
-                        if(instances[instanceId]) {
-                            instances[instanceId].status = 'disconnected';
-                            instances[instanceId].lastUpdate = new Date();
-                        }
-
-                        try {
-                            const pool = connectDB();
-                            conn = await pool.getConnection();
-                            await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['disconnected', instanceId]);
-                        } catch(dbError) {
-                            logger.error("DB update failed in 'close' (no-reconnect) state", dbError);
-                        } finally {
-                            if (conn) conn.release();
-                        }
+                    if (connection === 'close') {
+                        const statusCode = lastDisconnect?.error?.output?.statusCode;
+                        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
                         if (!hasResolved) {
-                            reject(new Error('Connection closed'));
+                            clearTimeout(timeout);
+                            instances[instanceId] = {
+                                sock,
+                                status: 'disconnected',
+                                lastUpdate: new Date(),
+                                registerId
+                            };
+                            await setInstanceStatus(instanceId, 'disconnected');
+                            reject(new Error(`WhatsApp connection closed before QR was ready (${statusCode || 'unknown'})`));
+                            hasResolved = true;
+                            return;
+                        }
+
+                        if (shouldReconnect) {
+                            if (instances[instanceId]) {
+                                instances[instanceId].status = 'reconnecting';
+                                instances[instanceId].lastUpdate = new Date();
+                            }
+                            await setInstanceStatus(instanceId, 'reconnecting');
+                            setTimeout(() => initializeSock(instanceId, registerId).catch((err) => {
+                                logger.error(`WhatsApp reconnect failed for ${instanceId}: ${err.message}`);
+                            }), 5000);
+                        } else {
+                            if (instances[instanceId]) {
+                                instances[instanceId].status = 'disconnected';
+                                instances[instanceId].lastUpdate = new Date();
+                            }
+                            await setInstanceStatus(instanceId, 'disconnected');
                         }
                     }
+                }
+
+                if (events['creds.update']) {
+                    await saveCreds();
                 }
             });
         });
@@ -153,28 +252,36 @@ export const initializeSock = async (instanceId, registerId) => {
 export const generateQRCode = async (req, res) => {
     let conn;
     try {
-        const { instanceId } = req.params;
-        const registerId = req.user.email;
+        const { instanceId: requestedInstanceId } = req.params;
 
         const pool = connectDB();
         conn = await pool.getConnection();
-        const [instance] = await conn.query('SELECT * FROM instances WHERE instance_id = ? AND register_id = ?', [instanceId, registerId]);
-
-        if (!instance.length) {
-            return res.status(404).json({ success: false, message: 'Instance not found or unauthorized' });
-        }
+        const { instanceId, registerId } = await resolveCanonicalInstance(conn, req, requestedInstanceId);
 
         const existingInstance = instances[instanceId];
         if (existingInstance?.status === 'connected') {
-            return res.json({ success: true, isAuthenticated: true });
+            return res.json({ success: true, isAuthenticated: true, connected: true, instanceId });
         }
 
-        if (existingInstance?.sock) {
-            await existingInstance.sock.logout().catch(() => {});
+        if (existingInstance?.qrCode) {
+            return res.json({
+                success: true,
+                qrCode: existingInstance.qrCode,
+                status: existingInstance.status || 'waiting_for_scan',
+                instanceId,
+                lastUpdate: existingInstance.lastUpdate
+            });
         }
 
-        const result = await initializeSock(instanceId, registerId);
-        res.json({ success: true, ...result });
+        let result;
+        try {
+            result = await initializeSock(instanceId, registerId);
+        } catch (firstError) {
+            logger.warn(`WhatsApp init failed for ${instanceId}, retrying with fresh auth: ${firstError.message}`);
+            result = await initializeSock(instanceId, registerId, { fresh: true });
+        }
+
+        res.json({ success: true, instanceId, ...result });
 
     } catch (error) {
         logger.error('QR code generation error:', error);
@@ -187,121 +294,20 @@ export const generateQRCode = async (req, res) => {
 export const getConnectionStatus = async (req, res) => {
     let conn;
     try {
-        const { instanceId } = req.params;
-        const registerId = req.user.email;
+        const { instanceId: requestedInstanceId } = req.params;
 
         const pool = connectDB();
         conn = await pool.getConnection();
-        const [instance] = await conn.query('SELECT * FROM instances WHERE instance_id = ? AND register_id = ?', [instanceId, registerId]);
-
-        if (!instance.length) {
-            // Check if user already has any instance
-            const [existingUserInstance] = await conn.query('SELECT * FROM instances WHERE register_id = ?', [registerId]);
-            
-            if (existingUserInstance.length > 0) {
-                // User already has an instance, return that instead of creating a new one
-                const existingInstanceId = existingUserInstance[0].instance_id;
-                logger.info(`User ${registerId} already has instance ${existingInstanceId}, returning existing instance`);
-                
-                const instanceData = instances[existingInstanceId];
-                const dbStatus = existingUserInstance[0].status;
-                
-                return res.json({
-                    success: true,
-                    status: instanceData?.status || dbStatus,
-                    message: `WhatsApp is ${instanceData?.status || dbStatus} (using existing instance)`,
-                    instanceId: existingInstanceId,
-                    qrCode: instanceData?.qrCode,
-                    lastUpdate: instanceData?.lastUpdate
-                });
-            }
-            
-            // Auto-create a new instance entry for this user so that the first status call succeeds
-            const [userRows] = await conn.query('SELECT email FROM users WHERE email = ?', [registerId]);
-            if (userRows.length) {
-                // Check if this instance_id already exists in the table (for any user)
-                const [existingInstance] = await conn.query('SELECT instance_id FROM instances WHERE instance_id = ?', [instanceId]);
-                
-                let finalInstanceId = instanceId;
-                
-                if (existingInstance.length > 0) {
-                    // Need to create a unique instance_id with suffix
-                    const baseInstanceId = instanceId;
-                    let counter = 1;
-                    let isUnique = false;
-                    
-                    while (!isUnique) {
-                        finalInstanceId = `${baseInstanceId}_${counter}`;
-                        // Check if this new instance_id already exists
-                        const [checkInstance] = await conn.query('SELECT instance_id FROM instances WHERE instance_id = ?', [finalInstanceId]);
-                        if (checkInstance.length === 0) {
-                            isUnique = true;
-                        } else {
-                            counter++;
-                        }
-                    }
-                    
-                    logger.info(`Created unique instance ID: ${finalInstanceId} for user ${registerId}`);
-                }
-                
-                try {
-                    await conn.query(
-                        'INSERT INTO instances (instance_id, register_id, status) VALUES (?, ?, ?)',
-                        [finalInstanceId, registerId, 'disconnected']
-                    );
-                    
-                    return res.json({
-                        success: true,
-                        status: 'disconnected',
-                        message: 'Instance created, waiting for initialization',
-                        instanceId: finalInstanceId, // Return the potentially modified instance ID
-                        qrCode: null,
-                        lastUpdate: null
-                    });
-                } catch (insertError) {
-                    // If we still get a duplicate error, try one more time with a timestamp suffix
-                    if (insertError.code === 'ER_DUP_ENTRY') {
-                        const timestamp = Date.now();
-                        finalInstanceId = `${instanceId}_${timestamp}`;
-                        logger.info(`Retry with timestamp-based instance ID: ${finalInstanceId} for user ${registerId}`);
-                        
-                        await conn.query(
-                            'INSERT INTO instances (instance_id, register_id, status) VALUES (?, ?, ?)',
-                            [finalInstanceId, registerId, 'disconnected']
-                        );
-                        
-                        return res.json({
-                            success: true,
-                            status: 'disconnected',
-                            message: 'Instance created with timestamp suffix, waiting for initialization',
-                            instanceId: finalInstanceId,
-                            qrCode: null,
-                            lastUpdate: null
-                        });
-                    } else {
-                        // Re-throw other errors
-                        throw insertError;
-                    }
-                }
-            } else {
-                // Cannot create due to FK, just respond with placeholder status
-                return res.json({
-                    success: true,
-                    status: 'disconnected',
-                    message: 'No instance record yet (user not in users table)',
-                    qrCode: null,
-                    lastUpdate: null
-                });
-            }
-        }
+        const { instanceId, row } = await resolveCanonicalInstance(conn, req, requestedInstanceId);
 
         const instanceData = instances[instanceId];
-        const dbStatus = instance[0].status;
+        const dbStatus = row.status;
 
         res.json({
             success: true,
             status: instanceData?.status || dbStatus,
             message: `WhatsApp is ${instanceData?.status || dbStatus}`,
+            instanceId,
             qrCode: instanceData?.qrCode,
             lastUpdate: instanceData?.lastUpdate
         });
@@ -316,30 +322,25 @@ export const getConnectionStatus = async (req, res) => {
 export const resetInstance = async (req, res) => {
     let conn;
     try {
-        const { instanceId } = req.params;
-        const registerId = req.user.email;
+        const { instanceId: requestedInstanceId } = req.params;
 
         const pool = connectDB();
         conn = await pool.getConnection();
-        const [instance] = await conn.query('SELECT * FROM instances WHERE instance_id = ? AND register_id = ?', [instanceId, registerId]);
-
-        if (!instance.length) {
-            return res.status(404).json({ success: false, message: 'Instance not found or unauthorized' });
-        }
+        const { instanceId } = await resolveCanonicalInstance(conn, req, requestedInstanceId);
 
         if (instances[instanceId]?.sock) {
             await instances[instanceId].sock.logout().catch(() => {});
         }
         delete instances[instanceId];
 
-        const authFolder = path.join(path.resolve('..', 'auth_info'), `instance_${instanceId}`);
+        const { authFolder } = getAuthFolder(instanceId);
         if (fs.existsSync(authFolder)) {
             fs.rmSync(authFolder, { recursive: true, force: true });
         }
 
         await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['disconnected', instanceId]);
 
-        res.json({ success: true, message: 'Instance reset successfully' });
+        res.json({ success: true, message: 'Instance reset successfully', instanceId });
     } catch (error) {
         logger.error('Reset error:', error);
         res.status(500).json({ success: false, message: 'Failed to reset instance' });

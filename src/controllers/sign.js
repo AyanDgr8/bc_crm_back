@@ -22,6 +22,11 @@ const transporter = nodemailer.createTransport({
 const SALT_ROUNDS = 10;
 const JWT_EXPIRATION = '10h'; // Match database session duration
 
+const buildFrontendUrl = (path) => {
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:9787';
+    return `${frontendUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
+};
+
 // Login User
 export const loginAdmin = async (req, res) => {
     const { email, password } = req.body;
@@ -333,7 +338,7 @@ export const forgotPassword = async (req, res) => {
         );
 
         // Create reset URL with token
-        const resetUrl = `${process.env.FRONTEND_URL}reset-password/${resetToken}`;
+        const resetUrl = buildFrontendUrl(`reset-password/${resetToken}`);
 
         // Send email
         const mailOptions = {
@@ -433,7 +438,7 @@ export const sendOTP = async (req, res) => {
         );
 
         // Create reset URL with token
-        const resetLink = `${process.env.FRONTEND_URL}reset-password/${resetToken}`;
+        const resetLink = buildFrontendUrl(`reset-password/${resetToken}`);
 
         // Email content
         const mailOptions = {

@@ -102,6 +102,7 @@ router.put('/:teamId', authenticateToken, async (req, res) => {
         const { teamId } = req.params;
         const {
             team_name,
+            team_extension,
             tax_id,
             reg_no,
             team_phone,
@@ -112,6 +113,13 @@ router.put('/:teamId', authenticateToken, async (req, res) => {
             team_detail
         } = req.body;
 
+        if (!team_extension) {
+            return res.status(400).json({
+                success: false,
+                message: 'Team extension is required'
+            });
+        }
+
         // Start transaction
         await connection.beginTransaction();
 
@@ -119,6 +127,7 @@ router.put('/:teamId', authenticateToken, async (req, res) => {
         const [result] = await connection.query(
             `UPDATE teams 
              SET team_name = ?, 
+                 team_extension = ?,
                  tax_id = ?,
                  reg_no = ?,
                  team_phone = ?,
@@ -130,6 +139,7 @@ router.put('/:teamId', authenticateToken, async (req, res) => {
              WHERE id = ?`,
             [
                 team_name,
+                team_extension,
                 tax_id,
                 reg_no,
                 team_phone,

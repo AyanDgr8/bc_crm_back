@@ -50,7 +50,9 @@ export const authenticateToken = async (req, res, next) => {
                 role: decoded.role || (isAdmin ? 'admin' : 'user'),
                 isAdmin: isAdmin,
                 brand_id: decoded.brand_id,
-                business_center_id: decoded.business_center_id
+                business_center_id: decoded.business_center_id,
+                sessionId: decoded.sessionId,
+                deviceId: decoded.deviceId
             };
 
             // Only check for brand_id if user is not an admin

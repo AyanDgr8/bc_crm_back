@@ -54,6 +54,7 @@ export const downloadCustomerData = async (req, res) => {
                 address,
                 country,
                 QUEUE_NAME,
+                designation,
                 disposition,
                 agent_name,
                 comment,

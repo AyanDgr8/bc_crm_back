@@ -1,0 +1,1 @@
+export const AGENT_STATS_POLL_INTERVAL_SECONDS = 5 * 60;

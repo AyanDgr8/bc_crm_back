@@ -94,15 +94,10 @@ export const loginAdmin = async (req, res) => {
                     });
                 }
 
-                // Clean up old sessions (older than 24 hours)
+                // Clean up old sessions (older than 24 hours), but keep current
+                // active sessions so the same login can be used in multiple tabs/devices.
                 await connection.query(
                     'UPDATE login_history SET is_active = false, logout_time = CURRENT_TIMESTAMP WHERE entity_id = ? AND entity_type = ? AND is_active = true AND last_activity < DATE_SUB(NOW(), INTERVAL 24 HOUR)',
-                    [user.id, user.role_name]
-                );
-
-                // Deactivate ALL existing active sessions for this user
-                await connection.query(
-                    'UPDATE login_history SET is_active = false, logout_time = CURRENT_TIMESTAMP WHERE entity_id = ? AND entity_type = ? AND is_active = true',
                     [user.id, user.role_name]
                 );
 
@@ -185,27 +180,28 @@ export const logoutAdmin = async (req, res) => {
         await connection.beginTransaction();
 
         const deviceId = req.headers['x-device-id'];
-        const adminId = req.user?.id;
+        const userId = req.user?.userId || req.user?.id;
+        const role = req.user?.role || req.decodedToken?.role;
         const sessionId = req.user?.sessionId;
 
-        if (!adminId || !deviceId) {
+        if (!userId || !deviceId || !role) {
             await connection.rollback();
             return res.status(400).json({ 
                 success: false,
-                message: 'Admin ID and Device ID are required' 
+                message: 'User ID, role and Device ID are required' 
             });
         }
 
-        // Update login history to mark session as inactive
+        // Update login history to mark only this user's current device session inactive.
         const [result] = await connection.query(
             `UPDATE login_history 
              SET is_active = false, 
                  logout_time = CURRENT_TIMESTAMP 
-             WHERE entity_type = 'admin' 
+             WHERE entity_type = ? 
              AND entity_id = ? 
              AND device_id = ? 
              AND is_active = true`,
-            [adminId, deviceId]
+            [role, userId, deviceId]
         );
 
         await connection.commit();
@@ -239,40 +235,57 @@ export const logoutAdmin = async (req, res) => {
     }
 };
 
-// Fetch Current Admin
+// Fetch Current User
 export const fetchCurrentAdmin = async (req, res) => {
     let connection;
     try {
         const pool = await connectDB();
         connection = await pool.getConnection();
 
-        // Get admin details
-        const [admins] = await connection.query(
-            'SELECT id, username, email FROM admin WHERE id = ?',
-            [req.user.id]
-        );
-        
-        if (admins.length === 0) {
-            return res.status(404).json({
+        const userId = req.user?.userId || req.user?.id;
+        const role = req.user?.role;
+
+        if (!userId || !role) {
+            return res.status(401).json({
                 success: false,
-                message: 'Admin not found'
+                message: 'Invalid user session'
             });
         }
 
-        const admin = admins[0];
+        const [rows] = role === 'admin'
+            ? await connection.query(
+                'SELECT id, username, email, "admin" as role FROM admin WHERE id = ?',
+                [userId]
+            )
+            : await connection.query(
+                `SELECT u.id, u.username, u.email, r.role_name as role, u.brand_id, u.business_center_id
+                 FROM users u
+                 JOIN roles r ON u.role_id = r.id
+                 WHERE u.id = ?`,
+                [userId]
+            );
 
-        // Send success response with admin information
+        if (rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        const user = rows[0];
+
         res.status(200).json({
             success: true,
-            data: {
-                id: admin.id,
-                username: admin.username,
-                email: admin.email,
-                isAdmin: true
-            }
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            isAdmin: user.role === 'admin',
+            brand_id: user.brand_id || null,
+            business_center_id: user.business_center_id || null
         });
     } catch (error) {
-        logger.error('Error fetching current admin:', error);
+        logger.error('Error fetching current user:', error);
         return res.status(500).json({
             success: false,
             message: 'Internal server error',

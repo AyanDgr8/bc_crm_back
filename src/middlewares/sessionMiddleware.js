@@ -39,10 +39,11 @@ export const validateSession = async (req, res, next) => {
             try {
                 await connection.beginTransaction();
 
-                // First, clean up old sessions and enforce single-device policy
+                // Clean up old sessions. Multiple active sessions are allowed for
+                // the same user, including other tabs and devices.
                 await connection.execute(
-                    'UPDATE login_history SET is_active = false, logout_time = NOW() WHERE entity_id = ? AND entity_type = ? AND is_active = true AND (TIMESTAMPDIFF(HOUR, login_time, NOW()) >= 24 OR device_id != ?)',
-                    [decoded.userId, decoded.role, deviceId]
+                    'UPDATE login_history SET is_active = false, logout_time = NOW() WHERE entity_id = ? AND entity_type = ? AND is_active = true AND TIMESTAMPDIFF(HOUR, login_time, NOW()) >= 24',
+                    [decoded.userId, decoded.role]
                 );
 
                 // Get active session for this user and device
@@ -63,7 +64,7 @@ export const validateSession = async (req, res, next) => {
                     if (shouldRefresh) {
                         // Avoid overwhelming DB: update only if last update > 60s ago
                         const [updateResult] = await connection.execute(
-                            'UPDATE login_history SET login_time = NOW() WHERE id = ? AND TIMESTAMPDIFF(SECOND, login_time, NOW()) >= 60',
+                            'UPDATE login_history SET last_activity = NOW() WHERE id = ? AND TIMESTAMPDIFF(SECOND, last_activity, NOW()) >= 60',
                             [sessions[0].id]
                         );
                         if (updateResult.affectedRows === 0) {

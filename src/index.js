@@ -5,6 +5,10 @@ import fs from "fs";
 import path from "path";
 import connectDB from "./db/index.js";
 import { app } from './app.js';
+import { ensureAgentStatsTables } from './db/agentStatsSchema.js';
+import { ensureReceptionActivityTables } from './db/receptionActivitySchema.js';
+import { ensureTeamSchema } from './db/teamSchema.js';
+import { startAgentStatsPoller, stopAgentStatsPoller } from './services/agentStatsService.js';
 import 'colors';
 // import { logger } from "./logger.js";
 
@@ -62,6 +66,7 @@ const gracefulShutdown = async () => {
   
   try {
     await pool.end();
+    stopAgentStatsPoller();
     console.log('?? MySQL pool closed successfully.'.green.bold);
   } catch (err) {
     console.error('? Error closing MySQL pool:'.red.bold, err);
@@ -99,6 +104,13 @@ const initApp = async () => {
     connection.release();
 
     console.log(`?? MySQL connected`.green.bold);
+    await ensureAgentStatsTables();
+    console.log('?? Agent stats tables ready'.green.bold);
+    await ensureReceptionActivityTables();
+    console.log('?? Reception activity tables ready'.green.bold);
+    await ensureTeamSchema();
+    console.log('?? Team schema ready'.green.bold);
+    startAgentStatsPoller();
     await startServer();
   } catch (err) {
     console.error("? MySQL connection failed!!!".red.bold, err);

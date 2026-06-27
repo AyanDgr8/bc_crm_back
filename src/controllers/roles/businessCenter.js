@@ -569,6 +569,7 @@ export const createBusinessTeams = async (req, res) => {
         for (const team of teams) {
             const {
                 team_name,
+                team_extension,
                 tax_id,
                 reg_no,
                 team_phone,
@@ -579,9 +580,9 @@ export const createBusinessTeams = async (req, res) => {
                 team_detail
             } = team;
 
-            if (!team_name) {
+            if (!team_name || !team_extension) {
                 await conn.rollback();
-                return res.status(400).json({ message: 'Team name is required for all teams' });
+                return res.status(400).json({ message: 'Team name and team extension are required for all teams' });
             }
 
             // Convert spaces to underscores in team_name
@@ -605,12 +606,12 @@ export const createBusinessTeams = async (req, res) => {
             // Create the team
             const [result] = await conn.query(
                 `INSERT INTO teams (
-                    team_name, tax_id, reg_no, team_phone, team_email,
+                    team_name, team_extension, tax_id, reg_no, team_phone, team_email,
                     team_address, team_country, team_prompt, team_detail,
                     team_type, created_by, brand_id, business_center_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
-                    formattedTeamName, tax_id, reg_no, team_phone, team_email,
+                    formattedTeamName, team_extension, tax_id, reg_no, team_phone, team_email,
                     team_address, team_country, team_prompt, team_detail,
                     'company', userId, brand_id, businessId
                 ]
@@ -619,6 +620,7 @@ export const createBusinessTeams = async (req, res) => {
             createdTeams.push({
                 id: result.insertId,
                 team_name: formattedTeamName,
+                team_extension,
                 tax_id,
                 reg_no,
                 team_phone,

@@ -10,7 +10,8 @@ import {
     checkDuplicates,
     getTeamRecords,
     getCustomersByDateRange,
-    getReceptionDashboardActivity
+    getReceptionDashboardActivity,
+    recordReceptionCallTransfer
 } from '../controllers/customers.js';
 
 import { deleteCustomer, deleteMultipleCustomers } from '../controllers/deleteCustomers.js';
@@ -62,6 +63,14 @@ import {
 } from '../controllers/whatsapp.js';
 
 import { validateSession } from '../middlewares/sessionMiddleware.js';
+import {
+    listAgentStatsConfigs,
+    upsertAgentStatsConfig,
+    pollAgentStatsConfigNow,
+    pollAgentStatsBusinessNow,
+    getAgentStatsFinalReports,
+    getAgentStatsTodaySummary
+} from '../controllers/agentStats.js';
 
 import { createUser, getAllUsers, getTeamMembers, updateTeamMember, deleteTeamMember } from '../controllers/users.js';
 
@@ -127,6 +136,14 @@ router.post('/logout', authenticateToken, logoutAdmin);
 router.get('/check-session', validateSession, checkSession);
 router.get('/current-user', authenticateToken, fetchCurrentAdmin);
 
+// Agent stats API configuration and reports
+router.get('/agent-stats/configs', authenticateToken, listAgentStatsConfigs);
+router.post('/agent-stats/configs', authenticateToken, upsertAgentStatsConfig);
+router.post('/agent-stats/configs/:id/poll', authenticateToken, pollAgentStatsConfigNow);
+router.post('/agent-stats/poll-now', authenticateToken, pollAgentStatsBusinessNow);
+router.get('/agent-stats/final', authenticateToken, getAgentStatsFinalReports);
+router.get('/agent-stats/today-summary', authenticateToken, getAgentStatsTodaySummary);
+
 // Team and user management routes
 router.post('/users/create', authenticateToken, createUser);
 router.get('/users/all', authenticateToken, getAllUsers);
@@ -179,6 +196,7 @@ router.post('/customers/log-change', authenticateToken, historyCustomer);
 router.get('/customers/reminders', authenticateToken, getReminders);
 router.get('/customers/getAllReminders', authenticateToken, getAllReminders);
 router.get('/dashboard/reception-activity', authenticateToken, getReceptionDashboardActivity);
+router.post('/dashboard/reception-call-transfer', authenticateToken, recordReceptionCallTransfer);
 
 // Route to assign customers to team/agent
 router.post('/customers/assign-team', authenticateToken, assignCustomerToTeam);

@@ -4,7 +4,7 @@ import connectDB from '../db/index.js';
 
 // Create a new team
 export const createTeam = async (req, res) => {
-    const { team_name, tax_id, reg_no, team_detail, team_address, team_country, team_prompt, team_phone, team_email, business_center_id } = req.body;
+    const { team_name, team_extension, tax_id, reg_no, team_detail, team_address, team_country, team_prompt, team_phone, team_email, business_center_id } = req.body;
     const created_by = req.user.userId; // Get userId from auth middleware
     
     console.log('User object:', req.user); // Add logging to see user object
@@ -16,6 +16,14 @@ export const createTeam = async (req, res) => {
 
         try {
             await conn.beginTransaction();
+
+            if (!team_name || !team_extension) {
+                await conn.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: 'Team name and team extension are required'
+                });
+            }
 
             // Check user permissions
             if (req.user.role !== 'brand_user' && req.user.role !== 'business_admin') {
@@ -94,13 +102,13 @@ export const createTeam = async (req, res) => {
             // Create new team with formatted team name
             const insertQuery = `
                 INSERT INTO teams (
-                    team_name, tax_id, reg_no, team_detail, team_address, 
+                    team_name, team_extension, tax_id, reg_no, team_detail, team_address, 
                     team_country, team_prompt, team_phone, team_email, 
                     team_type, created_by, brand_id, business_center_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
             
             const insertParams = [
-                formattedTeamName, tax_id, reg_no, team_detail, team_address,
+                formattedTeamName, team_extension, tax_id, reg_no, team_detail, team_address,
                 team_country, team_prompt, team_phone, team_email,
                 'company', created_by, req.user.brand_id, business_center_id || null
             ];
@@ -271,11 +279,29 @@ export const getTeamsByBusinessId = async (req, res) => {
         const [teams] = await conn.query(
             `SELECT t.*, 
                     bc.business_name as business_center_name,
-                    b.brand_name
+                    b.brand_name,
+                    COUNT(tm.id) as total_associates,
+                    CASE
+                        WHEN COUNT(tm.id) = 0 THEN JSON_ARRAY()
+                        ELSE JSON_ARRAYAGG(
+                            JSON_OBJECT(
+                                'id', tm.id,
+                                'username', tm.username,
+                                'extension', tm.extension,
+                                'email', tm.email,
+                                'mobile_num', tm.mobile_num,
+                                'designation', tm.designation,
+                                'team_id', tm.team_id
+                            )
+                        )
+                    END as associates
              FROM teams t 
              LEFT JOIN business_center bc ON t.business_center_id = bc.id
              LEFT JOIN brand b ON t.brand_id = b.id
-             WHERE t.business_center_id = ?`,
+             LEFT JOIN team_members tm ON tm.team_id = t.id
+             WHERE t.business_center_id = ?
+             GROUP BY t.id
+             ORDER BY t.created_at DESC`,
             [businessId]
         );
 
@@ -420,7 +446,7 @@ export const getTeamByName = async (req, res) => {
 
 // Update team
 export const updateTeam = async (req, res) => {
-    const { team_name, tax_id, reg_no, team_detail, team_address, team_country, team_prompt, team_phone, team_email } = req.body;
+    const { team_name, team_extension, tax_id, reg_no, team_detail, team_address, team_country, team_prompt, team_phone, team_email } = req.body;
     const teamId = req.params.id;
     let conn;
 
@@ -491,6 +517,17 @@ export const updateTeam = async (req, res) => {
         if (formattedTeamName) {
             updates.push('team_name = ?');
             params.push(formattedTeamName);
+        }
+        if (team_extension !== undefined) {
+            if (!team_extension) {
+                await conn.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: 'Team extension is required'
+                });
+            }
+            updates.push('team_extension = ?');
+            params.push(team_extension);
         }
         if (tax_id !== undefined) {
             updates.push('tax_id = ?');

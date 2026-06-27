@@ -659,13 +659,128 @@ export const getReceptionDashboardActivity = async (req, res) => {
       callScope.params
     );
 
+    let latestTransfer = null;
+    try {
+      const transferParams = [];
+      let transferScope = '';
+
+      if (req.user.role === 'receptionist' || req.user.role === 'business_admin') {
+        transferScope = 'WHERE rct.business_center_id = ?';
+        transferParams.push(req.user.business_center_id);
+      } else if (req.user.role === 'brand_user') {
+        transferScope = 'WHERE bc.brand_id = ?';
+        transferParams.push(req.user.brand_id);
+      }
+
+      const [transfers] = await connection.query(
+        `SELECT
+            rct.*,
+            rct.team_name AS QUEUE_NAME,
+            rct.team_name,
+            rct.member_name AS agent_name,
+            rct.member_name AS designation,
+            bc.business_name AS business_center_name
+         FROM reception_call_transfers rct
+         LEFT JOIN business_center bc ON bc.id = rct.business_center_id
+         ${transferScope}
+         ORDER BY rct.date_created DESC, rct.id DESC
+         LIMIT 1`,
+        transferParams
+      );
+
+      latestTransfer = transfers[0] || null;
+    } catch (transferError) {
+      console.error('Error fetching reception call transfer activity:', transferError);
+    }
+
     res.json({
       lastWalkIn: walkIns[0] || null,
-      lastCallTransferred: calls[0] || null
+      lastCallTransferred: latestTransfer || calls[0] || null
     });
   } catch (error) {
     console.error('Error fetching dashboard activity:', error);
     res.status(500).json({ message: 'Error fetching dashboard activity', error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+export const recordReceptionCallTransfer = async (req, res) => {
+  let connection;
+  try {
+    const {
+      businessCenterId,
+      teamId,
+      teamName,
+      memberId,
+      memberName,
+      memberEmail,
+      extension
+    } = req.body || {};
+
+    if (!businessCenterId || !teamName || !memberName || !extension) {
+      return res.status(400).json({
+        message: 'businessCenterId, teamName, memberName and extension are required'
+      });
+    }
+
+    const pool = await connectDB();
+    connection = await pool.getConnection();
+
+    if (req.user.role === 'receptionist' || req.user.role === 'business_admin') {
+      if (String(req.user.business_center_id) !== String(businessCenterId)) {
+        return res.status(403).json({ message: 'Access denied to this business center' });
+      }
+    } else if (req.user.role === 'brand_user') {
+      const [centers] = await connection.query(
+        'SELECT id FROM business_center WHERE id = ? AND brand_id = ?',
+        [businessCenterId, req.user.brand_id]
+      );
+
+      if (centers.length === 0) {
+        return res.status(403).json({ message: 'Access denied to this business center' });
+      }
+    } else if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const [result] = await connection.query(
+      `INSERT INTO reception_call_transfers
+        (business_center_id, team_id, team_name, member_id, member_name, member_email, extension, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        businessCenterId,
+        teamId || null,
+        teamName,
+        memberId || null,
+        memberName,
+        memberEmail || null,
+        extension,
+        req.user.userId || null
+      ]
+    );
+
+    const [rows] = await connection.query(
+      `SELECT
+          rct.*,
+          rct.team_name AS QUEUE_NAME,
+          rct.team_name,
+          rct.member_name AS agent_name,
+          rct.member_name AS designation,
+          bc.business_name AS business_center_name
+       FROM reception_call_transfers rct
+       LEFT JOIN business_center bc ON bc.id = rct.business_center_id
+       WHERE rct.id = ?`,
+      [result.insertId]
+    );
+
+    res.status(201).json({
+      message: 'Reception call transfer recorded',
+      transfer: rows[0] || null
+    });
+  } catch (error) {
+    console.error('Error recording reception call transfer:', error);
+    res.status(500).json({ message: 'Error recording reception call transfer', error: error.message });
   } finally {
     if (connection) connection.release();
   }
